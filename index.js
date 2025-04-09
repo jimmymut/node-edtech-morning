@@ -1,15 +1,24 @@
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
-import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { isUserLoggedIn } from "./middlewares/auth.js";
 dotenv.config();
+import mysql from "mysql2/promise";
+
+
+const conn = await mysql
+  .createConnection({
+    port: process.env.MYSQL_PORT,
+    host: process.env.MYSQL_HOST_NAME,
+    user: process.env.MySQL_USER,
+    password: process.env.MySQL_PASSWORD,
+    database: process.env.MySQL_DB_NAME,
+  });
 
 const app = express();
-const prisma = new PrismaClient();
 const port = process.env.PORT;
 const jwt_secret = process.env.JWT_SECRET;
 
@@ -29,11 +38,14 @@ app.post("/register", async (req, res) => {
 
     //alternative
     const { username, email, password } = req.body;
-    const existUsername = await prisma.user.findUnique({
-      where: {
-        username: username,
-      },
-    });
+
+    // check if the user with username exist
+    const existUsernameQuery = `SELECT * FROM user WHERE username=?`;
+
+    const [rows] = await conn.query(existUsernameQuery, [
+      username.toLowerCase(),
+    ]);
+    const existUsername = rows[0];
 
     if (existUsername) {
       return res
@@ -41,11 +53,9 @@ app.post("/register", async (req, res) => {
         .json({ message: "username already taken, try another one" });
     }
 
-    const existEmail = await prisma.user.findUnique({
-      where: {
-        email: email,
-      },
-    });
+    const existEmailQuery = `SELECT * FROM user WHERE email=?`;
+    const [rowsEmail] = await conn.query(existEmailQuery, [email]);
+    const existEmail = rowsEmail[0];
 
     if (existEmail) {
       return res
@@ -54,17 +64,21 @@ app.post("/register", async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await prisma.user.create({
-      data: {
-        username: username,
-        email: email,
-        password: hashedPassword,
-      },
-    });
+    // insert the user
+    const inserQuery =
+      "INSERT INTO user (username, email, password) VALUES (?, ?, ?)";
+    const [result] = await conn.query(inserQuery, [
+      username.toLowerCase(),
+      email,
+      hashedPassword,
+    ]);
+
+    const insertedQuery = "SELECT * FROM user WHERE id=?";
+    const [insertedUser] = await conn.query(insertedQuery, [result.insertId]);
 
     return res.status(201).json({
       message: "Account created successfully",
-      userData: newUser,
+      userData: insertedUser[0],
     });
   } catch (error) {
     console.log(error);
@@ -72,24 +86,13 @@ app.post("/register", async (req, res) => {
   }
 });
 
-app.get("/users", async (req, res) => {
+app.get("/users", isUserLoggedIn, async (req, res) => {
   try {
-    const users = await prisma.user.findMany();
+    const query = "select * from user;";
+    const [rows] = await conn.query(query);
     return res.status(200).json({
       message: "All users",
-      users: users,
-    });
-  } catch (error) {
-    console.log(error);
-    return res.status(500).json({ message: "Server error" });
-  }
-});
-app.get("/count user", async (req, res) => {
-  try {
-    const userCount = await prisma.user.count();
-    return res.status(200).json({
-      message: "All users",
-      users: users,
+      users: rows,
     });
   } catch (error) {
     console.log(error);
@@ -97,91 +100,93 @@ app.get("/count user", async (req, res) => {
   }
 });
 
-app.get("/users/count", async (req, res)=>{
-    try {
-        const userCount = await prisma.user.count();
-        return res.status(200).json({
-            message: "Total number of users",
-            number_of_users: userCount,
-            
-        })
-        
-    } catch (error) {
-        console.log(error)
-        return res.status(500).json({message: "Server error"})
-        
-    }
+app.get("/users/count", async (req, res) => {
+  try {
+    const query = "SELECT COUNT(*) AS count FROM user;";
+    const [result] = await conn.query(query);
+    const userCount = result[0].count;
+    return res.status(200).json({
+      message: "Total number of users",
+      number_of_users: userCount,
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({ message: "Server error" });
+  }
 });
 
 //Retrive a single user by id using params
-app.get("/users/:user_id", async(req, res)=>{
-    try {
-        const userId = parseInt(req.params.user_id);
-        const user = await prisma.user.findUnique({
-            where: { id: userId}
-        });
+app.get("/users/:user_id", async (req, res) => {
+  try {
+    const userId = parseInt(req.params.user_id);
+    const query = "SELECT * FROM user WHERE id=?";
+    const [result] = await conn.query(query, [userId]);
+    const user = result[0];
 
-        if(!user){
-            return res.status(404).json({
-                message: "User not found"
-            })
-        }
-        return res.status(200).json({
-            user: user,
-            message: "Oparation successful"
-        });
-        
-    } catch (error) {
-        console.log(error)
-        return res.status(500).json({message: "Server error"})
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
     }
+    return res.status(200).json({
+      user: user,
+      message: "Oparation successful",
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({ message: "Server error" });
+  }
 });
 
 // Update user
-app.put("/users/:user_id", async(req, res)=>{
-    try {
-        const userId = parseInt(req.params.user_id);
-        const { username } = req.body;
-        const existUsername = await prisma.user.findUnique({
-            where: {username}
-        });
-        if(existUsername){
-            return res.status(409).json({ message: "username already taken"})
-        }
-        const updatedUser = await prisma.user.update({
-            where: {id: userId},
-            data:{
-                username: username,
-            }
-        });
+app.put("/users/:user_id", async (req, res) => {
+  try {
+    const userId = parseInt(req.params.user_id);
+    const { username } = req.body;
 
-        return res.status(200).json({
-            message: "username updated successfully",
-            updatedUser
-        })
+    // check if the user with username exist
+    const existUsernameQuery = `SELECT * FROM user WHERE username=?`;
 
-        
-    } catch (error) {
-        console.log(error)
-        return res.status(500).json({message: "Server error"})
-    };
+    const [rows] = await conn.query(existUsernameQuery, [
+      username.toLowerCase(),
+    ]);
+    const existUsername = rows[0];
+
+    if (existUsername) {
+      return res.status(409).json({ message: "username already taken" });
+    }
+
+    const updateQuery = "UPDATE user SET username=? WHERE id=?";
+    const [result] = await conn.query(updateQuery, [username.toLowerCase(), userId]);
+    if(result.affectedRows===0){
+      return res.status(404).json({message: "User not found"});
+    }
+    const updatedUserQuery = "SELECT * FROM user WHERE id=?";
+    const [updatedUser] = await conn.query(updatedUserQuery,[userId])
+
+    return res.status(200).json({
+      message: "username updated successfully",
+      updatedUser:updatedUser[0],
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).json({ message: "Server error" });
+  }
 });
 
 app.delete("/users/:user_id", async (req, res)=>{
     try {
         const userId = parseInt(req.params.user_id);
-        const checkExist = await prisma.user.findFirst({
-            where: {id: userId}
-        });
-        if(!checkExist){
+        const deleteQuery= "DELETE FROM user WHERE id=?";
+        const [result] = await conn.query(deleteQuery, [userId]);
+
+        if(result.affectedRows === 0){
             return res.status(404).json({message: "User not found"})
         }
-        await prisma.user.delete({
-            where: { id: userId }
-        })
+        
 
         return res.status(200).json({message: "User deleted"});
-        
+
     } catch (error) {
         console.log(error)
         return res.status(500).json({message: "Server error"})
@@ -193,10 +198,9 @@ app.post("/login", async (req, res)=>{
     const { email, password } = req.body;
 
     // find the user in the database
-    const user = await prisma.user
-    .findUnique({
-      where: {email}
-    });
+    const query = "SELECT * FROM user WHERE email=?";
+    const [result] = await conn.query(query, [email]);
+    const user = result[0];
 
     // if the user if not found in the database, we return unauthorised response
     if(!user){
@@ -225,7 +229,7 @@ app.post("/login", async (req, res)=>{
       token,
       user,
     })
-    
+
   } catch (error) {
     console.log(error)
     return res.status(500).json({message: "Server error"})
@@ -249,14 +253,18 @@ app.patch("/change-password", isUserLoggedIn, async (req, res)=>{
       return res.status(400)
       .json({message: "New password should not be the same as the old password"})
     }
-    
+
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-    await prisma.user.update({
-      where: { id: user.id},
-      data: {
-        password: hashedNewPassword,
-      }
-    })
+
+    const changePwdQuery = "UPDATE user SET password=? WHERE id=?";
+    await conn.query(changePwdQuery, [hashedNewPassword, user.id]);
+
+    // await prisma.user.update({
+    //   where: { id: user.id},
+    //   data: {
+    //     password: hashedNewPassword,
+    //   }
+    // })
 
     return res.status(200).json({message: "password changed"})
   } catch (error) {
@@ -265,17 +273,8 @@ app.patch("/change-password", isUserLoggedIn, async (req, res)=>{
   }
 })
 
+app.use((req, res) => {
+    return res.status(404).json({ message: "Endpoint not found" });
+});
 
-
-// app.all("*", (req, res) => {
-//     return res.status(404).json({ message: "Endpoint not found" });
-// });
-
-prisma
-  .$connect()
-  .then(() => console.log("Database connected"))
-  .catch((err) => {
-    console.log(err);
-    process.exit(1);
-  });
 app.listen(port, () => console.log(`Server is running at ${port}`));
